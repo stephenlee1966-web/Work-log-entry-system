@@ -10,7 +10,7 @@ from streamlit_gsheets import GSheetsConnection
 # =====================================================================
 st.set_page_config(page_title="伺服器-工作日誌填寫系統", page_icon="📝", layout="wide")
 
-st.markdown("### 📝 工作日誌填寫系統 (Google Sheets 雲端版)")
+st.markdown("### 📝 工作日誌填寫系統")
 
 # =====================================================================
 # 0. 初始化儲存設定與暫存記憶體
