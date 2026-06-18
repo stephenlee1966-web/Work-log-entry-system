@@ -3,4 +3,4 @@ pandas
 openpyxl
 xlsxwriter
 xlrd
-streamlit-gsheets-connection
+st-gsheets-connection
