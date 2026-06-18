@@ -2,12 +2,11 @@ import streamlit as st
 import pandas as pd
 import os
 import io
-import json
 from datetime import datetime
-# 💡 引進 Google 官方憑證與 Drive 上傳套件
+# 💡 改用 Google 官方核心 API 套件
 from google.oauth2 import service_account
-from pydrive2.auth import GoogleAuth
-from pydrive2.drive import GoogleDrive
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
 # =====================================================================
 # [設定] 網頁版面自適應設定
@@ -32,12 +31,11 @@ if "export_buffer" not in st.session_state:
     st.session_state["export_buffer"] = []
 
 # =====================================================================
-# 🛠️ 核心功能：連線至 Google Drive 的函式 (修正版)
+# 🛠️ 核心功能：使用官方 API 連線至 Google Drive
 # =====================================================================
-def get_google_drive_instance():
-    """利用 Streamlit Cloud Secrets 中的 GCP 憑證初始化 Google Drive 連線"""
+def get_google_drive_service():
+    """利用 Streamlit Cloud Secrets 中的 GCP 憑證初始化 Google Drive 官方服務物件"""
     try:
-        # 從 st.secrets 中讀取先前設定的 connections.gsheets 資料（服務帳戶憑證）
         gcp_info = {
             "type": st.secrets["connections"]["gsheets"]["type"],
             "project_id": st.secrets["connections"]["gsheets"]["project_id"],
@@ -50,77 +48,77 @@ def get_google_drive_instance():
             "client_x509_cert_url": st.secrets["connections"]["gsheets"]["client_x509_cert_url"]
         }
         
-        # 💡 改用 Google 官方標準的憑證載入方式，解決 PyDrive2 新版相容性問題
         scope = ['https://www.googleapis.com/auth/drive']
         credentials = service_account.Credentials.from_service_account_info(gcp_info, scopes=scope)
         
-        gauth = GoogleAuth()
-        gauth.auth_method = 'service_account'
-        gauth.credentials = credentials  # 直接將標準憑證賦值給 PyDrive2
-        
-        return GoogleDrive(gauth)
+        # 💡 建立官方 Drive API 服務物件
+        service = build('drive', 'v3', credentials=credentials)
+        return service
     except Exception as e:
         st.error(f"❌ Google 雲端硬碟連線初始化失敗，請檢查 Secrets 設定。錯誤: {e}")
         return None
 
 def upload_excel_to_drive(file_name, dataframe):
-    """將 Pandas DataFrame 轉成 Excel 二進位流，並上傳/覆蓋至 Google Drive"""
-    drive = get_google_drive_instance()
-    if drive is None:
+    """將 Pandas DataFrame 轉成 Excel 並上傳/追加至 Google Drive (官方 API 版)"""
+    service = get_google_drive_service()
+    if service is None:
         return False
         
     try:
-        # 1. 將 Excel 寫入記憶體
-        excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-            dataframe.to_excel(writer, sheet_name="工作日誌報表", index=False)
-            # 自動調整欄寬
-            worksheet = writer.sheets["工作日誌報表"]
-            for i, col in enumerate(dataframe.columns):
-                column_len = max(dataframe[col].astype(str).str.len().max(), len(col)) + 4
-                worksheet.set_column(i, i, column_len)
+        # 1. 檢查雲端硬碟資料夾內是否已有同名檔案
+        query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name = '{file_name}' and trashed = false"
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
         
-        excel_data = excel_buffer.getvalue()
+        final_df = dataframe
+        file_id = None
         
-        # 2. 檢查雲端硬碟資料夾內是否已有同名檔案（若有則覆蓋，若無則新建）
-        file_list = drive.ListFile({
-            'q': f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and title = '{file_name}' and trashed = false"
-        }).GetList()
-        
-        if file_list:
-            # 找到既有檔案，準備覆蓋
-            drive_file = file_list[0]
-            # 如果需要追加資料，先下載舊資料合併
+        if files:
+            # 找到既有檔案的 ID
+            file_id = files[0]['id']
             try:
-                temp_path = "temp_download.xlsx"
-                drive_file.GetContentFile(temp_path)
-                existing_df = pd.read_excel(temp_path)
+                # 下載舊檔案進行資料合併追加
+                request = service.files().get_media(fileId=file_id)
+                downloaded_bytes = io.BytesIO()
+                downloader = MediaIoBaseDownload(downloaded_bytes, request)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+                
+                downloaded_bytes.seek(0)
+                existing_df = pd.read_excel(downloaded_bytes)
+                
                 if "備註" not in existing_df.columns:
                     existing_df["備註"] = ""
-                # 合併舊資料與新資料
-                combined_df = pd.concat([existing_df, dataframe], ignore_index=True)
-                
-                # 重新寫入記憶體
-                excel_buffer = io.BytesIO()
-                with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                    combined_df.to_excel(writer, sheet_name="工作日誌報表", index=False)
-                excel_data = excel_buffer.getvalue()
-                os.remove(temp_path)
+                    
+                # 合併 舊資料 + 新資料
+                final_df = pd.concat([existing_df, dataframe], ignore_index=True)
             except Exception:
-                pass # 失敗則直接覆蓋
+                pass # 如果下載或讀取失敗，則退回直接覆蓋
+                
+        # 2. 將最終的 DataFrame 寫入記憶體二進位流
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+            final_df.to_excel(writer, sheet_name="工作日誌報表", index=False)
+            # 自動調整欄寬
+            worksheet = writer.sheets["工作日誌報表"]
+            for i, col in enumerate(final_df.columns):
+                column_len = max(final_df[col].astype(str).str.len().max(), len(col)) + 4
+                worksheet.set_column(i, i, column_len)
+        
+        excel_buffer.seek(0)
+        media = MediaIoBaseUpload(excel_buffer, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', resumable=True)
+        
+        # 3. 執行儲存（若先前有舊檔 ID 則更新 update，無則新建 create）
+        if file_id:
+            service.files().update(fileId=file_id, media_body=media).execute()
         else:
-            # 沒找到同名檔案，建立新檔案
-            drive_file = drive.CreateFile({
-                'title': file_name,
-                'parents': [{'id': GOOGLE_DRIVE_FOLDER_ID}]
-            })
+            file_metadata = {
+                'name': file_name,
+                'parents': [GOOGLE_DRIVE_FOLDER_ID]
+            }
+            service.files().create(body=file_metadata, media_body=media, fields='id').execute()
             
-        # 3. 透過暫存檔寫入二進位內容並儲存上傳
-        with open("temp_upload.xlsx", "wb") as f:
-            f.write(excel_data)
-        drive_file.SetContentFile("temp_upload.xlsx")
-        drive_file.Upload()
-        os.remove("temp_upload.xlsx")
         return True
     except Exception as e:
         st.error(f"❌ 上傳至雲端硬碟失敗: {e}")
@@ -336,7 +334,7 @@ if company_employees and available_files:
             st.rerun()
 
     # =====================================================================
-    # 5. 渲染暫存區表格與儲存功能 (上傳至 Google Drive 雲端硬碟)
+    # 5. 渲染暫存區表格與儲存功能 (上傳至 Google Drive 雲端硬碟 - 官方原生版)
     # =====================================================================
     st.write("---")
     output_container = st.container(key="stable_output_container")
@@ -359,7 +357,7 @@ if company_employees and available_files:
                     success = upload_excel_to_drive(file_name, display_df)
                     
                 if success:
-                    st.success(f"🎉 儲存成功！檔案 `{file_name}` 已安全同步至您的 Google Drive 資料夾。")
+                    st.success(f"🎉 儲存成功！檔案 `{file_name}` 已透過官方 API 安全同步至您的 Google Drive。")
                     st.session_state["export_buffer"] = []
                     st.rerun()
         else:
