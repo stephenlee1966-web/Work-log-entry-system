@@ -2,31 +2,30 @@ import streamlit as st
 import pandas as pd
 import os
 from datetime import datetime
+# 💡 引進 Google Sheets 連線套件
+from streamlit_gsheets import GSheetsConnection
 
 # =====================================================================
 # [設定] 網頁版面自適應設定
 # =====================================================================
-# 設定 layout="wide"，讓網頁在手機、平板與電腦螢幕上都能 100% 滿版伸縮
 st.set_page_config(page_title="伺服器-工作日誌填寫系統", page_icon="📝", layout="wide")
 
-# 標題使用三級標題（已縮小 1/3）
-st.markdown("### 📝 工作日誌填寫系統")
+st.markdown("### 📝 工作日誌填寫系統 (Google Sheets 雲端版)")
 
 # =====================================================================
-# 0. 設定伺服器存放路徑與初始化暫存記憶體
+# 0. 初始化儲存設定與暫存記憶體
 # =====================================================================
 TARGET_FOLDER = "excel_files"
 EMPLOYEE_FILE = "公司人員名單.xlsx"
-OUTPUT_FOLDER = "reports"  # 報表儲存的目標資料夾
 
-# 自動建立伺服器需要的資料夾
-for folder in [TARGET_FOLDER, OUTPUT_FOLDER]:
-    if not os.path.exists(folder):
-        os.makedirs(folder)
+if not os.path.exists(TARGET_FOLDER):
+    os.makedirs(TARGET_FOLDER)
 
-# 初始化全域暫存記憶體
 if "export_buffer" not in st.session_state:
     st.session_state["export_buffer"] = []
+
+# 💡 初始化 Google Sheets 連線物件
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 # =====================================================================
 # 1. 讀取伺服器資料夾內所有 Excel 檔名的函式
@@ -42,7 +41,7 @@ def get_server_excel_files(folder, employee_list):
 def load_company_employees():
     file_path = os.path.join(TARGET_FOLDER, EMPLOYEE_FILE)
     if not os.path.exists(file_path):
-        st.error(f"❌ 找不到人員名單檔案！請將 `{EMPLOYEE_FILE}` 放入 `{TARGET_FOLDER}` 資料夾中。")
+        st.error(f"❌ 找不到人員名單檔案！請確認 GitHub 倉庫的 `{TARGET_FOLDER}` 資料夾內包含 `{EMPLOYEE_FILE}`。")
         return []
     try:
         emp_df = pd.read_excel(file_path)
@@ -51,7 +50,7 @@ def load_company_employees():
             names = emp_df['員工姓名'].dropna().astype(str).str.strip().unique().tolist()
             return sorted(names)
         else:
-            st.error(f"❌ 在 `{EMPLOYEE_FILE}` 內找不到「員工姓名」這一個欄位！")
+            st.error(f"❌ 內找不到「員工姓名」這一個欄位！")
             return []
     except Exception as e:
         st.error(f"❌ 讀取人員名單檔案失敗: {e}")
@@ -124,34 +123,23 @@ def load_single_file_data(file_name):
             
         return None, None
     except Exception as e:
-        st.error(f"❌ 讀取檔案【{file_name}】時發生錯誤，已自動跳過。")
         return None, None
 
 # =====================================================================
-# 3. 主要網頁渲染邏輯 (適合手機的緊湊一行排版)
+# 3. 主要網頁渲染邏輯
 # =====================================================================
 company_employees = load_company_employees()
 available_files = get_server_excel_files(TARGET_FOLDER, company_employees)
 
-if not company_employees:
-    st.warning(f"⚠️ 員工名單載入失敗，請確認 `{EMPLOYEE_FILE}` 欄位是否包含「員工姓名」。")
-elif not available_files:
-    st.info(f"💡 目前伺服器的 `{TARGET_FOLDER}/` 資料夾內沒有任何工程/報價資料庫 Excel 檔案。")
-else:
-    
+if company_employees and available_files:
     st.markdown("#### 📋 填表基礎設定")
     
-    # 💡 步驟 1、2 在手機上強制作為同一行（比例 1:1，並縮小間距）
     row1_col1, row1_col2 = st.columns([1, 1], gap="small")
     with row1_col1:
         selected_date = st.date_input("📅 1. 日期：", value=datetime.today().date())
     with row1_col2:
         selected_employee = st.selectbox("👤 2. 姓名：", company_employees)
         
-    # 預先加載案號資料庫
-    selected_file = available_files[0] if available_files else ""
-    
-    # 💡 步驟 3、4 在手機上強制作為同一行（比例 4:6，讓案號顯示長度足夠）
     row2_col1, row2_col2 = st.columns([4, 6], gap="small")
     with row2_col1:
         selected_file = st.selectbox("📁 3. 資料庫：", available_files)
@@ -174,7 +162,6 @@ else:
             disabled=len(project_list) == 0
         )
 
-    # 驗證步驟 1~4 是否順利抓取對應資料
     has_valid_selection = False
     current_selected_info = {}
 
@@ -200,32 +187,26 @@ else:
     if has_valid_selection:
         st.info(f"選定：**{current_selected_info['工程/報價案號']} | {current_selected_info['工程名稱']}**")
         
-        # 💡 將工作內容與備註權重設為 [44, 44, 12]，維持等寬與精確的單行排版
         input_col1, input_col2, input_col3 = st.columns([44, 44, 12], gap="small")
         
         with input_col1:
-            # ─── 📝 第 5 步驟：選擇工作內容 ───
             job_options = load_employee_job_contents(selected_employee)
             user_job_content = st.selectbox(
-                f"📝 5. 工作內容：",
-                options=job_options,
-                key="employee_job_select_box"
+                f"📝 5. 工作內容：", options=job_options, key="employee_job_select_box"
             )
             current_selected_info["工作內容"] = user_job_content.strip()
             
         with input_col2:
-            # ─── ✏️ 💡 修正：更名為「6. 備註」 ───
             user_memo = st.text_input("✏️ 6. 備註：", value="", key="employee_job_memo_input")
             current_selected_info["備註"] = user_memo.strip()
             
         with input_col3:
-            # ─── ⏱️ 💡 修正：更名為「7. 時數」 ───
             user_hours = st.number_input("⏱️ 7. 時數：", min_value=0.0, max_value=24.0, value=1.0, step=0.5)
             current_selected_info["填寫時數"] = user_hours
     else:
         st.warning("💡 請先完成上方 1~4 步驟項目。")
 
-    # ─── 💾 暫存與清空按鈕（手機版併排單行） ───
+    # ─── 💾 暫存與清空按鈕 ───
     st.write("---")
     btn_col1, btn_col2 = st.columns(2, gap="small")
     
@@ -256,7 +237,7 @@ else:
             st.rerun()
 
     # =====================================================================
-    # 5. 渲染暫存區表格與儲存功能
+    # 5. 渲染暫存區表格與儲存功能 (💡 改為上傳至 Google Sheets)
     # =====================================================================
     st.write("---")
     output_container = st.container(key="stable_output_container")
@@ -269,40 +250,27 @@ else:
             
             st.dataframe(display_df, width="stretch", hide_index=True, key="main_data_table")
             
-            if st.button("💾 儲存至伺服器 REPORTS", width="stretch", type="primary", key="save_report_btn"):
-                report_owner = st.session_state["export_buffer"][0]["員工姓名"]
-                file_name = f"{report_owner}_工作日誌時數報表_{datetime.now().strftime('%Y%m%d')}.xlsx"
-                full_save_path = os.path.join(OUTPUT_FOLDER, file_name)
-                
+            # 💡 點擊按鈕直接寫入 Google 試算表
+            if st.button("💾 儲存至雲端 Google 試算表", width="stretch", type="primary", key="save_report_btn"):
                 try:
-                    if os.path.exists(full_save_path):
-                        try:
-                            existing_df = pd.read_excel(full_save_path)
-                            if "備註" not in existing_df.columns:
-                                existing_df["備註"] = ""
-                            final_save_df = pd.concat([existing_df, display_df], ignore_index=True)
-                            action_msg = "已追加儲存！"
-                        except Exception:
-                            final_save_df = display_df
-                            action_msg = "（覆蓋建立）"
-                    else:
-                        final_save_df = display_df
-                        action_msg = "已建立全新報表！"
-                    
-                    with pd.ExcelWriter(full_save_path, engine='xlsxwriter') as writer:
-                        final_save_df.to_excel(writer, sheet_name="工作日誌報表", index=False)
+                    with st.spinner("正在連線至 Google 試算表..."):
+                        # 1. 讀取目前 Google Sheets 上的既有資料
+                        existing_df = conn.read(ttl=0) # ttl=0 代表不使用暫存，抓取絕對即時的資料
                         
-                        workbook  = writer.book
-                        worksheet = writer.sheets["工作日誌報表"]
-                        for i, col in enumerate(final_save_df.columns):
-                            column_len = max(final_save_df[col].astype(str).str.len().max(), len(col)) + 4
-                            worksheet.set_column(i, i, column_len)
-                    
-                    st.success(f"🎉 儲存成功！{action_msg}")
+                        # 清洗既有資料的空行
+                        existing_df = existing_df.dropna(how="all")
+                        
+                        # 2. 將新填寫的資料與既有資料合併
+                        final_df = pd.concat([existing_df, display_df], ignore_index=True)
+                        
+                        # 3. 重新覆蓋寫回 Google Sheets
+                        conn.update(data=final_df)
+                        
+                    st.success("🎉 成功同步儲存至 Google 試算表！您可直接開啟雲端硬碟查看。")
                     st.session_state["export_buffer"] = []
                     st.rerun()
                     
                 except Exception as e:
-                    st.error(f"❌ 儲存失敗: {e}")
+                    st.error(f"❌ 儲存至 Google 試さん表失敗，請檢查 Secrets 憑證設定。錯誤訊息: {e}")
         else:
             st.info("💡 暫存區無資料。請先選擇內容與時數後點擊「加入暫存區」。")
