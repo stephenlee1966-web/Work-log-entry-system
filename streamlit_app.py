@@ -4,7 +4,8 @@ import os
 import io
 import json
 from datetime import datetime
-# 💡 引進 Google Drive 上傳套件
+# 💡 引進 Google 官方憑證與 Drive 上傳套件
+from google.oauth2 import service_account
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 
@@ -21,7 +22,7 @@ st.markdown("### 📝 工作日誌填寫系統")
 TARGET_FOLDER = "excel_files"
 EMPLOYEE_FILE = "公司人員名單.xlsx"
 
-# ⚠️ 請替換成您在步驟 1 建立的 Google 雲端硬碟資料夾 ID
+# ⚠️ 請替換成您在 Google 雲端硬碟建立的資料夾 ID
 GOOGLE_DRIVE_FOLDER_ID = "https://drive.google.com/drive/folders/11z2FrCaJhspliWlZ96gKFNjQYJjHCZrh"
 
 if not os.path.exists(TARGET_FOLDER):
@@ -31,13 +32,12 @@ if "export_buffer" not in st.session_state:
     st.session_state["export_buffer"] = []
 
 # =====================================================================
-# 🛠️ 核心功能：連線至 Google Drive 的函式
+# 🛠️ 核心功能：連線至 Google Drive 的函式 (修正版)
 # =====================================================================
 def get_google_drive_instance():
     """利用 Streamlit Cloud Secrets 中的 GCP 憑證初始化 Google Drive 連線"""
     try:
         # 從 st.secrets 中讀取先前設定的 connections.gsheets 資料（服務帳戶憑證）
-        # 為了相容您之前的 Secrets 設定，我們直接抓取對應欄位
         gcp_info = {
             "type": st.secrets["connections"]["gsheets"]["type"],
             "project_id": st.secrets["connections"]["gsheets"]["project_id"],
@@ -50,11 +50,14 @@ def get_google_drive_instance():
             "client_x509_cert_url": st.secrets["connections"]["gsheets"]["client_x509_cert_url"]
         }
         
-        gauth = GoogleAuth()
+        # 💡 改用 Google 官方標準的憑證載入方式，解決 PyDrive2 新版相容性問題
         scope = ['https://www.googleapis.com/auth/drive']
+        credentials = service_account.Credentials.from_service_account_info(gcp_info, scopes=scope)
+        
+        gauth = GoogleAuth()
         gauth.auth_method = 'service_account'
-        # 將憑證載入 PyDrive2
-        gauth.credentials = gauth._CredentialsFromStreamByInfo(gcp_info, scope)
+        gauth.credentials = credentials  # 直接將標準憑證賦值給 PyDrive2
+        
         return GoogleDrive(gauth)
     except Exception as e:
         st.error(f"❌ Google 雲端硬碟連線初始化失敗，請檢查 Secrets 設定。錯誤: {e}")
@@ -87,9 +90,8 @@ def upload_excel_to_drive(file_name, dataframe):
         if file_list:
             # 找到既有檔案，準備覆蓋
             drive_file = file_list[0]
-            # 如果需要追加資料，先下載舊資料合併 (此處維持您原本追加或覆蓋的邏輯)
+            # 如果需要追加資料，先下載舊資料合併
             try:
-                # 暫存至本機以便讀取
                 temp_path = "temp_download.xlsx"
                 drive_file.GetContentFile(temp_path)
                 existing_df = pd.read_excel(temp_path)
@@ -113,9 +115,7 @@ def upload_excel_to_drive(file_name, dataframe):
                 'parents': [{'id': GOOGLE_DRIVE_FOLDER_ID}]
             })
             
-        # 3. 寫入二進位內容並儲存上傳
-        drive_file.content_string = excel_data # 透過 stream 寫入
-        # 修正 PyDrive 寫入二進位流的方法
+        # 3. 透過暫存檔寫入二進位內容並儲存上傳
         with open("temp_upload.xlsx", "wb") as f:
             f.write(excel_data)
         drive_file.SetContentFile("temp_upload.xlsx")
@@ -336,7 +336,7 @@ if company_employees and available_files:
             st.rerun()
 
     # =====================================================================
-    # 5. 渲染暫存區表格與儲存功能 (💡 改為上傳至 Google Drive 雲端硬碟)
+    # 5. 渲染暫存區表格與儲存功能 (上傳至 Google Drive 雲端硬碟)
     # =====================================================================
     st.write("---")
     output_container = st.container(key="stable_output_container")
@@ -352,7 +352,7 @@ if company_employees and available_files:
             # 💡 點擊按鈕上傳至 Google Drive
             if st.button("💾 儲存至雲端硬碟 Google Drive", width="stretch", type="primary", key="save_report_btn"):
                 report_owner = st.session_state["export_buffer"][0]["員工姓名"]
-                # 檔名範例：王大同_工作日誌時數報表_202606.xlsx (或按天)
+                # 每位員工每月獨立存成一個 Excel 檔案
                 file_name = f"{report_owner}_工作日誌時數報表_{datetime.now().strftime('%Y%m')}.xlsx"
                 
                 with st.spinner("正在上傳檔案至 Google 雲端硬碟..."):
