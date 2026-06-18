@@ -59,7 +59,7 @@ def get_google_drive_service():
         return None
 
 def upload_excel_to_drive(file_name, dataframe):
-    """將 Pandas DataFrame 轉成 Excel 並上傳/追加至 Google Drive (修正空間配額問題)"""
+    """將 Pandas DataFrame 轉成 Excel 並上傳/追加至 Google Drive (徹底修正空間擁有者問題)"""
     service = get_google_drive_service()
     if service is None:
         return False
@@ -111,7 +111,7 @@ def upload_excel_to_drive(file_name, dataframe):
         
         # 3. 執行儲存
         if file_id:
-            # 修改既有檔案
+            # 修改既有檔案（如果既有檔案的所有權已在 Create 階段成功移轉，此處就不會扣服務帳戶空間）
             service.files().update(fileId=file_id, media_body=media).execute()
         else:
             # 建立全新檔案
@@ -122,19 +122,24 @@ def upload_excel_to_drive(file_name, dataframe):
             new_file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
             new_file_id = new_file.get('id')
             
-            # ⚠️ 【修改點 2】請將下方改成您個人用來管理該雲端資料夾的真實 Google 帳號 Email
-            USER_GMAIL_ACCOUNT = "your-email@gmail.com" 
+            # ⚠️ 【修改點 2】請確保這裡填入您「擁有該資料夾」的真實 Google 帳號 Email
+            USER_GMAIL_ACCOUNT = "stephenlee1966@gmail.com" 
             
-            # 🌟 核心修正：將檔案權限建立給您自己，藉此調用您的硬碟空間配額，解決服務帳戶 0GB 的限制
+            # 🌟 核心修正：強制將最高擁有者權限（owner）轉讓給您，並附帶啟用 transferOwnership=True
             try:
                 user_permission = {
                     'type': 'user',
-                    'role': 'writer', 
+                    'role': 'owner', 
                     'emailAddress': USER_GMAIL_ACCOUNT
                 }
-                service.permissions().create(fileId=new_file_id, body=user_permission).execute()
-            except Exception:
-                pass # 防止權限覆蓋失敗導致整個程式中斷
+                service.permissions().create(
+                    fileId=new_file_id, 
+                    body=user_permission,
+                    transferOwnership=True
+                ).execute()
+            except Exception as e:
+                # 留作日誌偵錯使用
+                print(f"移轉擁有者失敗原因: {e}")
             
         return True
     except Exception as e:
@@ -374,7 +379,7 @@ if company_employees and available_files:
                     success = upload_excel_to_drive(file_name, display_df)
                     
                 if success:
-                    st.success(f"🎉 儲存成功！檔案 `{file_name}` 已透過官方 API 安全同步至您的 Google Drive。")
+                    st.success(f"🎉 儲存成功！檔案 `{file_name}` 已安全同步至您的 Google Drive 並完成空間轉讓。")
                     st.session_state["export_buffer"] = []
                     st.rerun()
         else:
