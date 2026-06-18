@@ -4,3 +4,4 @@ openpyxl
 xlsxwriter
 xlrd
 st-gsheets-connection
+PyDrive2
