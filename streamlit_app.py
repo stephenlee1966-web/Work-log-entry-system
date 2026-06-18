@@ -1,9 +1,12 @@
 import streamlit as st
 import pandas as pd
 import os
+import io
+import json
 from datetime import datetime
-# 💡 引進 Google Sheets 連線套件
-from streamlit_gsheets import GSheetsConnection
+# 💡 引進 Google Drive 上傳套件
+from pydrive2.auth import GoogleAuth
+from pydrive2.drive import GoogleDrive
 
 # =====================================================================
 # [設定] 網頁版面自適應設定
@@ -18,8 +21,8 @@ st.markdown("### 📝 工作日誌填寫系統")
 TARGET_FOLDER = "excel_files"
 EMPLOYEE_FILE = "公司人員名單.xlsx"
 
-# 標準 7 個欄位順序（與 Google 試算表從 A 到 G 欄完全一致）
-STANDARD_COLUMNS = ["填表日期", "員工姓名", "工程/報價案號", "工程名稱", "工作內容", "備註", "填寫時數"]
+# ⚠️ 請替換成您在步驟 1 建立的 Google 雲端硬碟資料夾 ID
+GOOGLE_DRIVE_FOLDER_ID = "https://drive.google.com/drive/folders/11z2FrCaJhspliWlZ96gKFNjQYJjHCZrh"
 
 if not os.path.exists(TARGET_FOLDER):
     os.makedirs(TARGET_FOLDER)
@@ -27,15 +30,108 @@ if not os.path.exists(TARGET_FOLDER):
 if "export_buffer" not in st.session_state:
     st.session_state["export_buffer"] = []
 
-# 初始化 Google Sheets 連線物件
-conn = st.connection("gsheets", type=GSheetsConnection)
+# =====================================================================
+# 🛠️ 核心功能：連線至 Google Drive 的函式
+# =====================================================================
+def get_google_drive_instance():
+    """利用 Streamlit Cloud Secrets 中的 GCP 憑證初始化 Google Drive 連線"""
+    try:
+        # 從 st.secrets 中讀取先前設定的 connections.gsheets 資料（服務帳戶憑證）
+        # 為了相容您之前的 Secrets 設定，我們直接抓取對應欄位
+        gcp_info = {
+            "type": st.secrets["connections"]["gsheets"]["type"],
+            "project_id": st.secrets["connections"]["gsheets"]["project_id"],
+            "private_key_id": st.secrets["connections"]["gsheets"]["private_key_id"],
+            "private_key": st.secrets["connections"]["gsheets"]["private_key"],
+            "client_email": st.secrets["connections"]["gsheets"]["client_email"],
+            "auth_uri": st.secrets["connections"]["gsheets"]["auth_uri"],
+            "token_uri": st.secrets["connections"]["gsheets"]["token_uri"],
+            "auth_provider_x509_cert_url": st.secrets["connections"]["gsheets"]["auth_provider_x509_cert_url"],
+            "client_x509_cert_url": st.secrets["connections"]["gsheets"]["client_x509_cert_url"]
+        }
+        
+        gauth = GoogleAuth()
+        scope = ['https://www.googleapis.com/auth/drive']
+        gauth.auth_method = 'service_account'
+        # 將憑證載入 PyDrive2
+        gauth.credentials = gauth._CredentialsFromStreamByInfo(gcp_info, scope)
+        return GoogleDrive(gauth)
+    except Exception as e:
+        st.error(f"❌ Google 雲端硬碟連線初始化失敗，請檢查 Secrets 設定。錯誤: {e}")
+        return None
+
+def upload_excel_to_drive(file_name, dataframe):
+    """將 Pandas DataFrame 轉成 Excel 二進位流，並上傳/覆蓋至 Google Drive"""
+    drive = get_google_drive_instance()
+    if drive is None:
+        return False
+        
+    try:
+        # 1. 將 Excel 寫入記憶體
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+            dataframe.to_excel(writer, sheet_name="工作日誌報表", index=False)
+            # 自動調整欄寬
+            worksheet = writer.sheets["工作日誌報表"]
+            for i, col in enumerate(dataframe.columns):
+                column_len = max(dataframe[col].astype(str).str.len().max(), len(col)) + 4
+                worksheet.set_column(i, i, column_len)
+        
+        excel_data = excel_buffer.getvalue()
+        
+        # 2. 檢查雲端硬碟資料夾內是否已有同名檔案（若有則覆蓋，若無則新建）
+        file_list = drive.ListFile({
+            'q': f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and title = '{file_name}' and trashed = false"
+        }).GetList()
+        
+        if file_list:
+            # 找到既有檔案，準備覆蓋
+            drive_file = file_list[0]
+            # 如果需要追加資料，先下載舊資料合併 (此處維持您原本追加或覆蓋的邏輯)
+            try:
+                # 暫存至本機以便讀取
+                temp_path = "temp_download.xlsx"
+                drive_file.GetContentFile(temp_path)
+                existing_df = pd.read_excel(temp_path)
+                if "備註" not in existing_df.columns:
+                    existing_df["備註"] = ""
+                # 合併舊資料與新資料
+                combined_df = pd.concat([existing_df, dataframe], ignore_index=True)
+                
+                # 重新寫入記憶體
+                excel_buffer = io.BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                    combined_df.to_excel(writer, sheet_name="工作日誌報表", index=False)
+                excel_data = excel_buffer.getvalue()
+                os.remove(temp_path)
+            except Exception:
+                pass # 失敗則直接覆蓋
+        else:
+            # 沒找到同名檔案，建立新檔案
+            drive_file = drive.CreateFile({
+                'title': file_name,
+                'parents': [{'id': GOOGLE_DRIVE_FOLDER_ID}]
+            })
+            
+        # 3. 寫入二進位內容並儲存上傳
+        drive_file.content_string = excel_data # 透過 stream 寫入
+        # 修正 PyDrive 寫入二進位流的方法
+        with open("temp_upload.xlsx", "wb") as f:
+            f.write(excel_data)
+        drive_file.SetContentFile("temp_upload.xlsx")
+        drive_file.Upload()
+        os.remove("temp_upload.xlsx")
+        return True
+    except Exception as e:
+        st.error(f"❌ 上傳至雲端硬碟失敗: {e}")
+        return False
 
 # =====================================================================
 # 1. 讀取伺服器資料夾內所有 Excel 檔名的函式
 # =====================================================================
 def get_server_excel_files(folder, employee_list):
     emp_files = [f"{name}.xlsx" for name in employee_list]
-    return [f for f in os.listdir(folder) if (f.endswith('.xlsx') or f.endswith('.xls')) and f != EMPLOYEE_FILE and f not in emp_files]
+    return [f_name for f_name in os.listdir(folder) if (f_name.endswith('.xlsx') or f_name.endswith('.xls')) and f_name != EMPLOYEE_FILE and f_name not in emp_files]
 
 # =====================================================================
 # 1.5 獨立讀取「公司人員名單.xlsx」的函式
@@ -240,7 +336,7 @@ if company_employees and available_files:
             st.rerun()
 
     # =====================================================================
-    # 5. 渲染暫存區表格與儲存功能（強制固定 A~G 欄順序寫入 Google Sheets）
+    # 5. 渲染暫存區表格與儲存功能 (💡 改為上傳至 Google Drive 雲端硬碟)
     # =====================================================================
     st.write("---")
     output_container = st.container(key="stable_output_container")
@@ -249,52 +345,22 @@ if company_employees and available_files:
         if st.session_state["export_buffer"]:
             st.markdown("##### 📝 待匯出暫存清單")
             buffer_df = pd.DataFrame(st.session_state["export_buffer"])
-            
-            # 確保目前的暫存資料欄位順序完全正確
-            display_df = buffer_df[STANDARD_COLUMNS]
+            display_df = buffer_df[["填表日期", "員工姓名", "工程/報價案號", "工程名稱", "工作內容", "備註", "填寫時數"]]
             
             st.dataframe(display_df, width="stretch", hide_index=True, key="main_data_table")
             
-            # 💡 點擊按鈕直接寫入 Google 試算表
-            if st.button("💾 儲存至雲端 Google 試算表", width="stretch", type="primary", key="save_report_btn"):
-                try:
-                    with st.spinner("正在連線至 Google 試算表..."):
-                        # ⚠️ 請將下方的網址替換成您真正的 Google 試算表網址
-                        target_url = "https://docs.google.com/spreadsheets/d/1okjXLBhYBVkPmfSvnAVsg6jlHsldQqWW4dJThc_eBwk/edit?gid=0#gid=0"
-                        
-                        # 1. 讀取目前 Google Sheets 上的既有資料 (ttl=0 確保不抓舊快取)
-                        existing_df = conn.read(spreadsheet=target_url, ttl=0)
-                        
-                        # 清洗既有資料：移除完全空白的行
-                        existing_df = existing_df.dropna(how="all")
-                        
-                        # 2. 如果既有資料不是空的，強制清洗並對齊欄位順序
-                        if not existing_df.empty:
-                            # 如果既有試算表缺少某些標準欄位，程式自動幫它補齊空欄
-                            for col in STANDARD_COLUMNS:
-                                if col not in existing_df.columns:
-                                    existing_df[col] = ""
-                            
-                            # 強制將既有資料排序為 A~G 的標準順序
-                            existing_df = existing_df[STANDARD_COLUMNS]
-                            
-                            # 合併 舊資料 與 新暫存區資料
-                            final_df = pd.concat([existing_df, display_df], ignore_index=True)
-                        else:
-                            # 如果 Google 試算表目前是全新空白的，直接使用新資料
-                            final_df = display_df
-                        
-                        # 再次把關：確保最後寫回的 DataFrame 順序絕對不走樣
-                        final_df = final_df[STANDARD_COLUMNS]
-                        
-                        # 3. 重新覆蓋寫回 Google Sheets
-                        conn.update(spreadsheet=target_url, data=final_df)
-                        
-                    st.success("🎉 成功同步儲存至 Google 試算表！您可直接開啟雲端硬碟查看。")
+            # 💡 點擊按鈕上傳至 Google Drive
+            if st.button("💾 儲存至雲端硬碟 Google Drive", width="stretch", type="primary", key="save_report_btn"):
+                report_owner = st.session_state["export_buffer"][0]["員工姓名"]
+                # 檔名範例：王大同_工作日誌時數報表_202606.xlsx (或按天)
+                file_name = f"{report_owner}_工作日誌時數報表_{datetime.now().strftime('%Y%m')}.xlsx"
+                
+                with st.spinner("正在上傳檔案至 Google 雲端硬碟..."):
+                    success = upload_excel_to_drive(file_name, display_df)
+                    
+                if success:
+                    st.success(f"🎉 儲存成功！檔案 `{file_name}` 已安全同步至您的 Google Drive 資料夾。")
                     st.session_state["export_buffer"] = []
                     st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"❌ 儲存至 Google 試算表失敗，請檢查 Secrets 憑證設定。錯誤訊息: {e}")
         else:
             st.info("💡 暫存區無資料。請先選擇內容與時數後點擊「加入暫存區」。")
