@@ -22,7 +22,7 @@ TARGET_FOLDER = "excel_files"
 EMPLOYEE_FILE = "公司人員名單.xlsx"
 
 # ⚠️ 請替換成您在 Google 雲端硬碟建立的資料夾 ID
-GOOGLE_DRIVE_FOLDER_ID = "https://drive.google.com/drive/folders/11z2FrCaJhspliWlZ96gKFNjQYJjHCZrh"
+GOOGLE_DRIVE_FOLDER_ID = "11z2FrCaJhspliWlZ96gKFNjQYJjHCZrh"
 
 if not os.path.exists(TARGET_FOLDER):
     os.makedirs(TARGET_FOLDER)
