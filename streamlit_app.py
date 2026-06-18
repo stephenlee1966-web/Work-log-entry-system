@@ -10,7 +10,7 @@ from streamlit_gsheets import GSheetsConnection
 # =====================================================================
 st.set_page_config(page_title="伺服器-工作日誌填寫系統", page_icon="📝", layout="wide")
 
-st.markdown("### 📝 工作日誌填寫系統")
+st.markdown("### 📝 工作日誌填寫系統 (Google Sheets 雲端版)")
 
 # =====================================================================
 # 0. 初始化儲存設定與暫存記憶體
@@ -18,16 +18,13 @@ st.markdown("### 📝 工作日誌填寫系統")
 TARGET_FOLDER = "excel_files"
 EMPLOYEE_FILE = "公司人員名單.xlsx"
 
-# 標準 7 個欄位順序（與 Google 試算表從 A 到 G 欄完全一致）
-STANDARD_COLUMNS = ["填表日期", "員工姓名", "工程/報價案號", "工程名稱", "工作內容", "備註", "填寫時數"]
-
 if not os.path.exists(TARGET_FOLDER):
     os.makedirs(TARGET_FOLDER)
 
 if "export_buffer" not in st.session_state:
     st.session_state["export_buffer"] = []
 
-# 初始化 Google Sheets 連線物件
+# 💡 初始化 Google Sheets 連線物件
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # =====================================================================
@@ -240,7 +237,7 @@ if company_employees and available_files:
             st.rerun()
 
     # =====================================================================
-    # 5. 渲染暫存區表格與儲存功能（強制固定 A~G 欄順序寫入 Google Sheets）
+    # 5. 渲染暫存區表格與儲存功能 (💡 改為上傳至 Google Sheets)
     # =====================================================================
     st.write("---")
     output_container = st.container(key="stable_output_container")
@@ -249,9 +246,7 @@ if company_employees and available_files:
         if st.session_state["export_buffer"]:
             st.markdown("##### 📝 待匯出暫存清單")
             buffer_df = pd.DataFrame(st.session_state["export_buffer"])
-            
-            # 確保目前的暫存資料欄位順序完全正確
-            display_df = buffer_df[STANDARD_COLUMNS]
+            display_df = buffer_df[["填表日期", "員工姓名", "工程/報價案號", "工程名稱", "工作內容", "備註", "填寫時數"]]
             
             st.dataframe(display_df, width="stretch", hide_index=True, key="main_data_table")
             
@@ -259,42 +254,23 @@ if company_employees and available_files:
             if st.button("💾 儲存至雲端 Google 試算表", width="stretch", type="primary", key="save_report_btn"):
                 try:
                     with st.spinner("正在連線至 Google 試算表..."):
-                        # ⚠️ 請將下方的網址替換成您真正的 Google 試算表網址
-                        target_url = "https://docs.google.com/spreadsheets/d/您的試算表一長串英文代碼/edit"
+                        # 1. 讀取目前 Google Sheets 上的既有資料
+                        existing_df = conn.read(ttl=0) # ttl=0 代表不使用暫存，抓取絕對即時的資料
                         
-                        # 1. 讀取目前 Google Sheets 上的既有資料 (ttl=0 確保不抓舊快取)
-                        existing_df = conn.read(spreadsheet=target_url, ttl=0)
-                        
-                        # 清洗既有資料：移除完全空白的行
+                        # 清洗既有資料的空行
                         existing_df = existing_df.dropna(how="all")
                         
-                        # 2. 如果既有資料不是空的，強制清洗並對齊欄位順序
-                        if not existing_df.empty:
-                            # 如果既有試算表缺少某些標準欄位，程式自動幫它補齊空欄
-                            for col in STANDARD_COLUMNS:
-                                if col not in existing_df.columns:
-                                    existing_df[col] = ""
-                            
-                            # 強制將既有資料排序為 A~G 的標準順序
-                            existing_df = existing_df[STANDARD_COLUMNS]
-                            
-                            # 合併 舊資料 與 新暫存區資料
-                            final_df = pd.concat([existing_df, display_df], ignore_index=True)
-                        else:
-                            # 如果 Google 試算表目前是全新空白的，直接使用新資料
-                            final_df = display_df
-                        
-                        # 再次把關：確保最後寫回的 DataFrame 順序絕對不走樣
-                        final_df = final_df[STANDARD_COLUMNS]
+                        # 2. 將新填寫的資料與既有資料合併
+                        final_df = pd.concat([existing_df, display_df], ignore_index=True)
                         
                         # 3. 重新覆蓋寫回 Google Sheets
-                        conn.update(spreadsheet=target_url, data=final_df)
+                        conn.update(data=final_df)
                         
                     st.success("🎉 成功同步儲存至 Google 試算表！您可直接開啟雲端硬碟查看。")
                     st.session_state["export_buffer"] = []
                     st.rerun()
                     
                 except Exception as e:
-                    st.error(f"❌ 儲存至 Google 試算表失敗，請檢查 Secrets 憑證設定。錯誤訊息: {e}")
+                    st.error(f"❌ 儲存至 Google 試さん表失敗，請檢查 Secrets 憑證設定。錯誤訊息: {e}")
         else:
             st.info("💡 暫存區無資料。請先選擇內容與時數後點擊「加入暫存區」。")
