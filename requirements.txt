@@ -5,3 +5,4 @@ xlsxwriter
 xlrd
 st-gsheets-connection
 PyDrive2
+google-auth
