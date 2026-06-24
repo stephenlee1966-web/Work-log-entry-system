@@ -243,47 +243,47 @@ else:
             st.rerun()
 
     # =====================================================================
-    # 5. 渲染暫存區表格與儲存功能（總時數移至標題下方）
+    # 5. 渲染暫存區表格與儲存功能（進階安全互動版）
     # =====================================================================
     st.write("---")
     output_container = st.container(key="stable_output_container")
     
     with output_container:
         if st.session_state["export_buffer"]:
-            # 將目前的暫存資料轉換為 DataFrame
+            # 將暫存列表轉為 DataFrame
             buffer_df = pd.DataFrame(st.session_state["export_buffer"])
             buffer_df = buffer_df[["填表日期", "員工姓名", "工程/報價案號", "工程名稱", "工作內容", "備註", "填寫時數"]]
             buffer_df["填寫時數"] = pd.to_numeric(buffer_df["填寫時數"], errors='coerce').fillna(0.0)
             
-            # 1. 🔍 計算最新的總時數
+            # 1. 🔍 即時計算最新的總時數
             total_hours = buffer_df["填寫時數"].sum()
             
             # 2. 顯示標題
             st.markdown("##### 📝 待匯出暫存清單")
             
-            # 3. 🌟 【新改動】將總時數顯示在標題正下方，並給予精緻的手機自適應滿版區塊樣式
+            # 3. 📊 【新功能】將總時數精準顯示在標題正下方，使用顯眼且適合手機排版的通知樣式
             st.markdown(
-                f"<div style='color:#0073e6; background-color:#e6f2ff; padding:8px 12px; border-radius:5px; font-weight:bold; margin-bottom:10px; font-size:14px; border-left: 4px solid #0073e6;'>"
+                f"<div style='color:#0073e6; background-color:#e6f2ff; padding:8px 12px; border-radius:5px; font-weight:bold; margin-bottom:10px; font-size:14px; border-left: 4px solid #0073e6Edge;'>"
                 f"📊 今日累計總時數：{total_hours} 小時"
                 f"</div>", 
                 unsafe_allow_html=True
             )
             
-            # 4. 資料編輯器表格
+            # 4. 🛠️ 資料編輯器（num_rows="dynamic" 開啟勾選並刪除整列功能）
             edited_df = st.data_editor(
                 buffer_df,
                 width="stretch",
-                num_rows="dynamic",
-                disabled=["員工姓名"],
-                hide_index=False,
+                num_rows="dynamic",   # 🌟 關鍵：支援使用者「勾選整列並刪除」
+                disabled=["員工姓名"],  # 保護姓名不被誤改
+                hide_index=False,     # 顯示左側索引，點選索引即可選取該列
                 key="main_data_table_editor"
             )
             
-            # 5. 🔄 即時回寫與清洗
+            # 5. 🔄 安全型態清洗與回寫
             edited_df["填寫時數"] = pd.to_numeric(edited_df["填寫時數"], errors='coerce').fillna(0.0)
             st.session_state["export_buffer"] = edited_df.to_dict(orient="records")
             
-            # 6. 如果時數變更，立刻重新整理重新整理總時數
+            # 6. 🔄 數值防跑掉重新整理機制：若資料被刪除/覆蓋修改，且導致總時數變化，立刻觸發 rerun 更新上方的總時數顯示
             if edited_df["填寫時數"].sum() != total_hours:
                 st.rerun()
             
