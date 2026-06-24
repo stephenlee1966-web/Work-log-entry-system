@@ -243,70 +243,80 @@ else:
             st.rerun()
 
     # =====================================================================
-    # 5. 渲染暫存區表格與儲存功能（升級支援：即時修改、動態加總總時數）
+    # 5. 渲染暫存區表格與儲存功能（進階版：支援整列勾選刪除、數值即時更新）
     # =====================================================================
     st.write("---")
     output_container = st.container(key="stable_output_container")
     
     with output_container:
         if st.session_state["export_buffer"]:
-            # 將暫存資料轉為 DataFrame
+            # 將目前的暫存資料轉換為 DataFrame
             buffer_df = pd.DataFrame(st.session_state["export_buffer"])
-            # 確保欄位順序與型態
             buffer_df = buffer_df[["填表日期", "員工姓名", "工程/報價案號", "工程名稱", "工作內容", "備註", "填寫時數"]]
-            buffer_df["填寫時數"] = buffer_df["填寫時數"].astype(float)
+            buffer_df["填寫時數"] = pd.to_numeric(buffer_df["填寫時數"], errors='coerce').fillna(0.0)
             
-            # 💡 功能一：動態計算並展示「總時數」
+            # 1. 🔍 即時動態計算最新的總時數
             total_hours = buffer_df["填寫時數"].sum()
+            
+            # 2. 顯示帶有動態時數的標題
             st.markdown(f"##### 📝 待匯出暫存清單   📊 <span style='color:#0073e6; background-color:#e6f2ff; padding:3px 8px; border-radius:5px;'>今日累計總時數：{total_hours} 小時</span>", unsafe_allow_html=True)
             
-            # 💡 功能二：使用 st.data_editor 讓使用者可以直接在畫面上修改資料
+            # 3. 🛠️ 啟用資料編輯器（設定 num_rows="dynamic" 開啟勾選刪除列功能）
             edited_df = st.data_editor(
                 buffer_df,
                 width="stretch",
-                hide_index=True,
+                num_rows="dynamic",  # 🌟 關鍵：允許使用者自由「刪除」或「新增」整列資料
+                disabled=["員工姓名"], # 保護特定欄位不被任意修改
+                hide_index=False,    # 顯示索引，方便使用者點選某一列
                 key="main_data_table_editor"
             )
             
-            # 隨時將使用者在網頁上修改後的最新資料回寫到 session_state 中
+            # 4. 🔄 即時回寫：只要使用者刪除或修改了資料，立刻更新暫存記憶體 (讓下一次 rerun 時時數正確)
+            # 為了防止刪除或更改後時數欄位格式跑掉，進行二次清洗與型態確保
+            edited_df["填寫時數"] = pd.to_numeric(edited_df["填寫時數"], errors='coerce').fillna(0.0)
             st.session_state["export_buffer"] = edited_df.to_dict(orient="records")
             
+            # 5. 💡 如果資料被刪除或修改，且目前的總時數與畫面展示不符時，強制重新載入頁面重新整理總時數
+            if edited_df["填寫時數"].sum() != total_hours:
+                st.rerun()
+            
             if st.button("💾 儲存至伺服器 REPORTS", width="stretch", type="primary", key="save_report_btn"):
-                report_owner = st.session_state["export_buffer"][0]["員工姓名"]
-                # 這裡保留原始設定（一天一檔），如需改為一月一檔可將 %Y%m%d 改為 %Y%m
-                file_name = f"{report_owner}_工作日誌時數報表_{datetime.now().strftime('%Y%m%d')}.xlsx"
-                full_save_path = os.path.join(OUTPUT_FOLDER, file_name)
-                
-                try:
-                    if os.path.exists(full_save_path):
-                        try:
-                            existing_df = pd.read_excel(full_save_path)
-                            if "備註" not in existing_df.columns:
-                                existing_df["備註"] = ""
-                            # 使用最終修改過後的 edited_df 進行追加
-                            final_save_df = pd.concat([existing_df, edited_df], ignore_index=True)
-                            action_msg = "已追加儲存！"
-                        except Exception:
+                if not st.session_state["export_buffer"]:
+                    st.warning("⚠️ 暫存清單已被清空，無法儲存！")
+                else:
+                    report_owner = st.session_state["export_buffer"][0]["員工姓名"]
+                    file_name = f"{report_owner}_工作日誌時數報表_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                    full_save_path = os.path.join(OUTPUT_FOLDER, file_name)
+                    
+                    try:
+                        if os.path.exists(full_save_path):
+                            try:
+                                existing_df = pd.read_excel(full_save_path)
+                                if "備註" not in existing_df.columns:
+                                    existing_df["備註"] = ""
+                                final_save_df = pd.concat([existing_df, edited_df], ignore_index=True)
+                                action_msg = "已追加儲存！"
+                            except Exception:
+                                final_save_df = edited_df
+                                action_msg = "（覆蓋建立）"
+                        else:
                             final_save_df = edited_df
-                            action_msg = "（覆蓋建立）"
-                    else:
-                        final_save_df = edited_df
-                        action_msg = "已建立全新報表！"
-                    
-                    with pd.ExcelWriter(full_save_path, engine='xlsxwriter') as writer:
-                        final_save_df.to_excel(writer, sheet_name="工作日誌報表", index=False)
+                            action_msg = "已建立全新報表！"
                         
-                        workbook  = writer.book
-                        worksheet = writer.sheets["工作日誌報表"]
-                        for i, col in enumerate(final_save_df.columns):
-                            column_len = max(final_save_df[col].astype(str).str.len().max(), len(col)) + 4
-                            worksheet.set_column(i, i, column_len)
-                    
-                    st.success(f"🎉 儲存成功！{action_msg}")
-                    st.session_state["export_buffer"] = []
-                    st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"❌ 儲存失敗: {e}")
+                        with pd.ExcelWriter(full_save_path, engine='xlsxwriter') as writer:
+                            final_save_df.to_excel(writer, sheet_name="工作日誌報表", index=False)
+                            
+                            workbook  = writer.book
+                            worksheet = writer.sheets["工作日誌報表"]
+                            for i, col in enumerate(final_save_df.columns):
+                                column_len = max(final_save_df[col].astype(str).str.len().max(), len(col)) + 4
+                                worksheet.set_column(i, i, column_len)
+                        
+                        st.success(f"🎉 儲存成功！{action_msg}")
+                        st.session_state["export_buffer"] = []
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"❌ 儲存失敗: {e}")
         else:
             st.info("💡 暫存區無資料。請先選擇內容與時數後點擊「加入暫存區」。")
