@@ -317,7 +317,7 @@ if company_employees and available_files:
             st.rerun()
 
     # =====================================================================
-    # 5. 渲染暫存區表格與儲存功能（支援 Google Drive 互動修正版）
+    # 5. 渲染暫存區表格與儲存功能（修正：保護關鍵欄位，僅備註與時數能改）
     # =====================================================================
     st.write("---")
     output_container = st.container(key="stable_output_container")
@@ -334,7 +334,7 @@ if company_employees and available_files:
             # 2. 顯示標題
             st.markdown("##### 📝 待匯出暫存清單")
             
-            # 3. 🌟 顯示總時數在標題下方
+            # 3. 顯示總時數在標題下方
             st.markdown(
                 f"<div style='color:#0073e6; background-color:#e6f2ff; padding:8px 12px; border-radius:5px; font-weight:bold; margin-bottom:10px; font-size:14px; border-left: 4px solid #0073e6;'>"
                 f"📊 今日累計總時數：{total_hours} 小時"
@@ -342,12 +342,12 @@ if company_employees and available_files:
                 unsafe_allow_html=True
             )
             
-            # 4. 🛠️ 改為 st.data_editor 並啟用 num_rows="dynamic" 支援勾選刪除與修改
+            # 4. 🛠️ 【修改點】在 disabled 參數中加入所有禁止修改的欄位，僅允許「備註」與「填寫時數」被自由編輯覆蓋
             edited_df = st.data_editor(
                 buffer_df,
                 width="stretch",
                 num_rows="dynamic",
-                disabled=["員工姓名"],
+                disabled=["填表日期", "員工姓名", "工程/報價案號", "工程名稱", "工作內容"], # 🔒 鎖定關鍵欄位
                 hide_index=False,
                 key="main_data_table_editor"
             )
