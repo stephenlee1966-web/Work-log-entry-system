@@ -193,4 +193,137 @@ else:
     if has_valid_selection:
         st.info(f"選定：**{current_selected_info['工程/報價案號']} | {current_selected_info['工程名稱']}**")
         
-        input_col1, input_col2, input_col3 = st.columns(
+        input_col1, input_col2, input_col3 = st.columns([44, 44, 12], gap="small")
+        
+        with input_col1:
+            job_options = load_employee_job_contents(selected_employee)
+            user_job_content = st.selectbox(
+                f"📝 5. 工作內容：", options=job_options, key="employee_job_select_box"
+            )
+            current_selected_info["工作內容"] = user_job_content.strip()
+            
+        with input_col2:
+            user_memo = st.text_input("✏️ 6. 備註：", value="", key="employee_job_memo_input")
+            current_selected_info["備註"] = user_memo.strip()
+            
+        with input_col3:
+            user_hours = st.number_input("⏱️ 7. 時數：", min_value=0.0, max_value=24.0, value=1.0, step=0.5)
+            current_selected_info["填寫時數"] = user_hours
+    else:
+        st.warning("💡 請先完成上方 1~4 步驟項目。")
+
+    # ─── 💾 暫存與清空按鈕 ───
+    st.write("---")
+    btn_col1, btn_col2 = st.columns(2, gap="small")
+    
+    with btn_col1:
+        is_btn_disabled = (not has_valid_selection or 
+                           "⚠️" in current_selected_info.get("工作內容", "") or 
+                           "💡" in current_selected_info.get("工作內容", "") or 
+                           "❌" in current_selected_info.get("工作內容", ""))
+        
+        if st.button("➕ 加入暫存區", width="stretch", disabled=is_btn_disabled, type="secondary", key="add_to_buffer_btn"):
+            is_duplicate = any(
+                item["填表日期"] == current_selected_info["填表日期"] and 
+                item["員工姓名"] == current_selected_info["員工姓名"] and
+                item["工程/報價案號"] == current_selected_info["工程/報價案號"] and
+                item["工作內容"] == current_selected_info["工作內容"] and
+                item["備註"] == current_selected_info["備註"]
+                for item in st.session_state["export_buffer"]
+            )
+            if is_duplicate:
+                st.warning("⚠️ 已在暫存區。")
+            else:
+                st.session_state["export_buffer"].append(current_selected_info.copy())
+                st.rerun()
+
+    with btn_col2:
+        if st.button("🗑️ 清空暫存", width="stretch", key="clear_buffer_btn"):
+            st.session_state["export_buffer"] = []
+            st.rerun()
+
+    # =====================================================================
+    # 5. 渲染暫存區表格與儲存功能（總時數移至標題下方）
+    # =====================================================================
+    st.write("---")
+    output_container = st.container(key="stable_output_container")
+    
+    with output_container:
+        if st.session_state["export_buffer"]:
+            # 將目前的暫存資料轉換為 DataFrame
+            buffer_df = pd.DataFrame(st.session_state["export_buffer"])
+            buffer_df = buffer_df[["填表日期", "員工姓名", "工程/報價案號", "工程名稱", "工作內容", "備註", "填寫時數"]]
+            buffer_df["填寫時數"] = pd.to_numeric(buffer_df["填寫時數"], errors='coerce').fillna(0.0)
+            
+            # 1. 🔍 計算最新的總時數
+            total_hours = buffer_df["填寫時數"].sum()
+            
+            # 2. 顯示標題
+            st.markdown("##### 📝 待匯出暫存清單")
+            
+            # 3. 🌟 【新改動】將總時數顯示在標題正下方，並給予精緻的手機自適應滿版區塊樣式
+            st.markdown(
+                f"<div style='color:#0073e6; background-color:#e6f2ff; padding:8px 12px; border-radius:5px; font-weight:bold; margin-bottom:10px; font-size:14px; border-left: 4px solid #0073e6;'>"
+                f"📊 今日累計總時數：{total_hours} 小時"
+                f"</div>", 
+                unsafe_allow_html=True
+            )
+            
+            # 4. 資料編輯器表格
+            edited_df = st.data_editor(
+                buffer_df,
+                width="stretch",
+                num_rows="dynamic",
+                disabled=["員工姓名"],
+                hide_index=False,
+                key="main_data_table_editor"
+            )
+            
+            # 5. 🔄 即時回寫與清洗
+            edited_df["填寫時數"] = pd.to_numeric(edited_df["填寫時數"], errors='coerce').fillna(0.0)
+            st.session_state["export_buffer"] = edited_df.to_dict(orient="records")
+            
+            # 6. 如果時數變更，立刻重新整理重新整理總時數
+            if edited_df["填寫時數"].sum() != total_hours:
+                st.rerun()
+            
+            if st.button("💾 儲存至伺服器 REPORTS", width="stretch", type="primary", key="save_report_btn"):
+                if not st.session_state["export_buffer"]:
+                    st.warning("⚠️ 暫存清單已被清空，無法儲存！")
+                else:
+                    report_owner = st.session_state["export_buffer"][0]["員工姓名"]
+                    file_name = f"{report_owner}_工作日誌時數報表_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                    full_save_path = os.path.join(OUTPUT_FOLDER, file_name)
+                    
+                    try:
+                        if os.path.exists(full_save_path):
+                            try:
+                                existing_df = pd.read_excel(full_save_path)
+                                if "備註" not in existing_df.columns:
+                                    existing_df["備註"] = ""
+                                final_save_df = pd.concat([existing_df, edited_df], ignore_index=True)
+                                action_msg = "已追加儲存！"
+                            except Exception:
+                                final_save_df = edited_df
+                                action_msg = "（覆蓋建立）"
+                        else:
+                            final_save_df = edited_df
+                            action_msg = "已建立全新報表！"
+                        
+                        with pd.ExcelWriter(full_save_path, engine='xlsxwriter') as writer:
+                            final_save_df.to_excel(writer, sheet_name="工作日誌報表", index=False)
+                            
+                            workbook  = writer.book
+                            worksheet = writer.sheets["工作日誌報表"]
+                            for i, col in enumerate(final_save_df.columns):
+                                column_len = max(final_save_df[col].astype(str).str.len().max(), len(col)) + 4
+                                worksheet.set_column(i, i, column_len)
+                        
+                        st.success(f"🎉 儲存成功！{action_msg}")
+                        st.session_state["export_buffer"] = []
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"❌ 儲存失敗: {e}")
+        else:
+            st.info("💡 暫存區無資料。請先選擇內容與時數後點擊「加入暫存區」。")
