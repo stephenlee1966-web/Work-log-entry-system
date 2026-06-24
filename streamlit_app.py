@@ -1,7 +1,13 @@
 import streamlit as st
 import pandas as pd
 import os
+import io
 from datetime import datetime
+# 引進 Google 官方 Oauth 與 Drive API 核心套件
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
 # =====================================================================
 # [設定] 網頁版面自適應設定
@@ -11,27 +17,117 @@ st.set_page_config(page_title="伺服器-工作日誌填寫系統", page_icon="�
 st.markdown("### 📝 工作日誌填寫系統")
 
 # =====================================================================
-# 0. 設定伺服器存放路徑與初始化暫存記憶體
+# 0. 初始化儲存設定與暫存記憶體
 # =====================================================================
 TARGET_FOLDER = "excel_files"
 EMPLOYEE_FILE = "公司人員名單.xlsx"
-OUTPUT_FOLDER = "reports"  # 報表儲存的目標資料夾
 
-# 自動建立伺服器需要的資料夾
-for folder in [TARGET_FOLDER, OUTPUT_FOLDER]:
-    if not os.path.exists(folder):
-        os.makedirs(folder)
+# ⚠️ 【修改點】請確認為您個人雲端硬碟建立的資料夾 ID (不含網址)
+GOOGLE_DRIVE_FOLDER_ID = "11z2FrCaJhspliWlZ96gKFNjQYJjHCZrh"
 
-# 初始化全域暫存記憶體
+if not os.path.exists(TARGET_FOLDER):
+    os.makedirs(TARGET_FOLDER)
+
 if "export_buffer" not in st.session_state:
     st.session_state["export_buffer"] = []
+
+# =====================================================================
+# 🛠️ 核心功能：使用個人帳戶 OAuth 2.0 連線至 Google Drive
+# =====================================================================
+def get_google_drive_service():
+    """利用 Secrets 中的個人 OAuth 憑證，以「您本人身份」初始化 Google Drive 服務"""
+    try:
+        # 從 Streamlit Secrets 讀取個人 OAuth 資料
+        creds_data = {
+            "client_id": st.secrets["google_oauth"]["client_id"],
+            "client_secret": st.secrets["google_oauth"]["client_secret"],
+            "refresh_token": st.secrets["google_oauth"]["refresh_token"],
+            "token_uri": "https://oauth2.googleapis.com/token"
+        }
+        
+        # 建立個人憑證物件
+        creds = Credentials.from_authorized_user_info(creds_data, scopes=['https://www.googleapis.com/auth/drive'])
+        
+        # 如果 access token 過期，自動使用 refresh token 刷新
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            
+        service = build('drive', 'v3', credentials=creds)
+        return service
+    except Exception as e:
+        st.error(f"❌ Google 雲端硬碟個人驗證失敗，請檢查 Secrets 中的 OAuth 設定。錯誤: {e}")
+        return None
+
+def upload_excel_to_drive(file_name, dataframe):
+    """將 Pandas DataFrame 轉成 Excel 並上傳至個人的雲端硬碟 (扣除個人空間，永不噴 403)"""
+    service = get_google_drive_service()
+    if service is None:
+        return False
+        
+    try:
+        # 1. 檢查雲端硬碟資料夾內是否已有同名檔案
+        query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name = '{file_name}' and trashed = false"
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
+        
+        final_df = dataframe
+        file_id = None
+        
+        if files:
+            file_id = files[0]['id']
+            try:
+                # 下載舊檔案進行資料合併追加
+                request = service.files().get_media(fileId=file_id)
+                downloaded_bytes = io.BytesIO()
+                downloader = MediaIoBaseDownload(downloaded_bytes, request)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+                
+                downloaded_bytes.seek(0)
+                existing_df = pd.read_excel(downloaded_bytes)
+                
+                if "備註" not in existing_df.columns:
+                    existing_df["備註"] = ""
+                    
+                # 合併 舊資料 + 新資料
+                final_df = pd.concat([existing_df, dataframe], ignore_index=True)
+            except Exception:
+                pass 
+                
+        # 2. 將最終的 DataFrame 寫入記憶體二進位流
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+            final_df.to_excel(writer, sheet_name="工作日誌報表", index=False)
+            worksheet = writer.sheets["工作日誌報表"]
+            for i, col in enumerate(final_df.columns):
+                column_len = max(final_df[col].astype(str).str.len().max(), len(col)) + 4
+                worksheet.set_column(i, i, column_len)
+        
+        excel_buffer.seek(0)
+        media = MediaIoBaseUpload(excel_buffer, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', resumable=True)
+        
+        # 3. 執行儲存 (因為是用您的身份操作，上傳的檔案自動屬於您並扣除您的空間)
+        if file_id:
+            service.files().update(fileId=file_id, media_body=media).execute()
+        else:
+            file_metadata = {
+                'name': file_name,
+                'parents': [GOOGLE_DRIVE_FOLDER_ID]
+            }
+            service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            
+        return True
+    except Exception as e:
+        st.error(f"❌ 上傳至雲端硬碟失敗: {e}")
+        return False
 
 # =====================================================================
 # 1. 讀取伺服器資料夾內所有 Excel 檔名的函式
 # =====================================================================
 def get_server_excel_files(folder, employee_list):
     emp_files = [f"{name}.xlsx" for name in employee_list]
-    return [f for f in os.listdir(folder) if (f.endswith('.xlsx') or f.endswith('.xls')) and f != EMPLOYEE_FILE and f not in emp_files]
+    return [f_name for f_name in os.listdir(folder) if (f_name.endswith('.xlsx') or f_name.endswith('.xls')) and f_name != EMPLOYEE_FILE and f_name not in emp_files]
 
 # =====================================================================
 # 1.5 獨立讀取「公司人員名單.xlsx」的函式
@@ -40,7 +136,7 @@ def get_server_excel_files(folder, employee_list):
 def load_company_employees():
     file_path = os.path.join(TARGET_FOLDER, EMPLOYEE_FILE)
     if not os.path.exists(file_path):
-        st.error(f"❌ 找不到人員名單檔案！請將 `{EMPLOYEE_FILE}` 放入 `{TARGET_FOLDER}` 資料夾中。")
+        st.error(f"❌ 找不到人員名單檔案！請確認 GitHub 倉庫的 `{TARGET_FOLDER}` 資料夾內包含 `{EMPLOYEE_FILE}`。")
         return []
     try:
         emp_df = pd.read_excel(file_path)
@@ -49,7 +145,7 @@ def load_company_employees():
             names = emp_df['員工姓名'].dropna().astype(str).str.strip().unique().tolist()
             return sorted(names)
         else:
-            st.error(f"❌ 在 `{EMPLOYEE_FILE}` 內找不到「員工姓名」這一個欄位！")
+            st.error(f"❌ 內找不到「員工姓名」這一個欄位！")
             return []
     except Exception as e:
         st.error(f"❌ 讀取人員名單檔案失敗: {e}")
@@ -122,7 +218,6 @@ def load_single_file_data(file_name):
             
         return None, None
     except Exception as e:
-        st.error(f"❌ 讀取檔案【{file_name}】時發生錯誤，已自動跳過。")
         return None, None
 
 # =====================================================================
@@ -131,11 +226,7 @@ def load_single_file_data(file_name):
 company_employees = load_company_employees()
 available_files = get_server_excel_files(TARGET_FOLDER, company_employees)
 
-if not company_employees:
-    st.warning(f"⚠️ 員工名單載入失敗，請確認 `{EMPLOYEE_FILE}` 欄位是否包含「員工姓名」。")
-elif not available_files:
-    st.info(f"💡 目前伺服器的 `{TARGET_FOLDER}/` 資料夾內沒有任何工程/報價資料庫 Excel 檔案。")
-else:
+if company_employees and available_files:
     st.markdown("#### 📋 填表基礎設定")
     
     row1_col1, row1_col2 = st.columns([1, 1], gap="small")
@@ -144,8 +235,6 @@ else:
     with row1_col2:
         selected_employee = st.selectbox("👤 2. 姓名：", company_employees)
         
-    selected_file = available_files[0] if available_files else ""
-    
     row2_col1, row2_col2 = st.columns([4, 6], gap="small")
     with row2_col1:
         selected_file = st.selectbox("📁 3. 資料庫：", available_files)
@@ -243,87 +332,30 @@ else:
             st.rerun()
 
     # =====================================================================
-    # 5. 渲染暫存區表格與儲存功能（進階安全互動版）
+    # 5. 渲染暫存區表格與儲存功能 (上傳至 個人 Google Drive)
     # =====================================================================
     st.write("---")
     output_container = st.container(key="stable_output_container")
     
     with output_container:
         if st.session_state["export_buffer"]:
-            # 將暫存列表轉為 DataFrame
-            buffer_df = pd.DataFrame(st.session_state["export_buffer"])
-            buffer_df = buffer_df[["填表日期", "員工姓名", "工程/報價案號", "工程名稱", "工作內容", "備註", "填寫時數"]]
-            buffer_df["填寫時數"] = pd.to_numeric(buffer_df["填寫時數"], errors='coerce').fillna(0.0)
-            
-            # 1. 🔍 即時計算最新的總時數
-            total_hours = buffer_df["填寫時數"].sum()
-            
-            # 2. 顯示標題
             st.markdown("##### 📝 待匯出暫存清單")
+            buffer_df = pd.DataFrame(st.session_state["export_buffer"])
+            display_df = buffer_df[["填表日期", "員工姓名", "工程/報價案號", "工程名稱", "工作內容", "備註", "填寫時數"]]
             
-            # 3. 📊 【新功能】將總時數精準顯示在標題正下方，使用顯眼且適合手機排版的通知樣式
-            st.markdown(
-                f"<div style='color:#0073e6; background-color:#e6f2ff; padding:8px 12px; border-radius:5px; font-weight:bold; margin-bottom:10px; font-size:14px; border-left: 4px solid #0073e6Edge;'>"
-                f"📊 今日累計總時數：{total_hours} 小時"
-                f"</div>", 
-                unsafe_allow_html=True
-            )
+            st.dataframe(display_df, width="stretch", hide_index=True, key="main_data_table")
             
-            # 4. 🛠️ 資料編輯器（num_rows="dynamic" 開啟勾選並刪除整列功能）
-            edited_df = st.data_editor(
-                buffer_df,
-                width="stretch",
-                num_rows="dynamic",   # 🌟 關鍵：支援使用者「勾選整列並刪除」
-                disabled=["員工姓名"],  # 保護姓名不被誤改
-                hide_index=False,     # 顯示左側索引，點選索引即可選取該列
-                key="main_data_table_editor"
-            )
-            
-            # 5. 🔄 安全型態清洗與回寫
-            edited_df["填寫時數"] = pd.to_numeric(edited_df["填寫時數"], errors='coerce').fillna(0.0)
-            st.session_state["export_buffer"] = edited_df.to_dict(orient="records")
-            
-            # 6. 🔄 數值防跑掉重新整理機制：若資料被刪除/覆蓋修改，且導致總時數變化，立刻觸發 rerun 更新上方的總時數顯示
-            if edited_df["填寫時數"].sum() != total_hours:
-                st.rerun()
-            
-            if st.button("💾 儲存至伺服器 REPORTS", width="stretch", type="primary", key="save_report_btn"):
-                if not st.session_state["export_buffer"]:
-                    st.warning("⚠️ 暫存清單已被清空，無法儲存！")
-                else:
-                    report_owner = st.session_state["export_buffer"][0]["員工姓名"]
-                    file_name = f"{report_owner}_工作日誌時數報表_{datetime.now().strftime('%Y%m%d')}.xlsx"
-                    full_save_path = os.path.join(OUTPUT_FOLDER, file_name)
+            # 點擊按鈕上傳至 Google Drive
+            if st.button("💾 儲存至雲端硬碟 Google Drive", width="stretch", type="primary", key="save_report_btn"):
+                report_owner = st.session_state["export_buffer"][0]["員工姓名"]
+                file_name = f"{report_owner}_工作日誌時數報表_{datetime.now().strftime('%Y%m')}.xlsx"
+                
+                with st.spinner("正在使用個人憑證同步至雲端硬碟..."):
+                    success = upload_excel_to_drive(file_name, display_df)
                     
-                    try:
-                        if os.path.exists(full_save_path):
-                            try:
-                                existing_df = pd.read_excel(full_save_path)
-                                if "備註" not in existing_df.columns:
-                                    existing_df["備註"] = ""
-                                final_save_df = pd.concat([existing_df, edited_df], ignore_index=True)
-                                action_msg = "已追加儲存！"
-                            except Exception:
-                                final_save_df = edited_df
-                                action_msg = "（覆蓋建立）"
-                        else:
-                            final_save_df = edited_df
-                            action_msg = "已建立全新報表！"
-                        
-                        with pd.ExcelWriter(full_save_path, engine='xlsxwriter') as writer:
-                            final_save_df.to_excel(writer, sheet_name="工作日誌報表", index=False)
-                            
-                            workbook  = writer.book
-                            worksheet = writer.sheets["工作日誌報表"]
-                            for i, col in enumerate(final_save_df.columns):
-                                column_len = max(final_save_df[col].astype(str).str.len().max(), len(col)) + 4
-                                worksheet.set_column(i, i, column_len)
-                        
-                        st.success(f"🎉 儲存成功！{action_msg}")
-                        st.session_state["export_buffer"] = []
-                        st.rerun()
-                        
-                    except Exception as e:
-                        st.error(f"❌ 儲存失敗: {e}")
+                if success:
+                    st.success(f"🎉 儲存成功！檔案 `{file_name}` 已安全同步至您的個人 Google Drive！")
+                    st.session_state["export_buffer"] = []
+                    st.rerun()
         else:
             st.info("💡 暫存區無資料。請先選擇內容與時數後點擊「加入暫存區」。")
