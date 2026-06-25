@@ -317,7 +317,56 @@ if company_employees and available_files:
             st.rerun()
 
     # =====================================================================
-    # 5. 渲染暫存區表格與儲存功能（修正：保護關鍵欄位，僅備註與時數能改）
+    # 5. 🛠️ 【全新修改】暫存列選擇、刪除與「彈出確認視窗」的覆蓋功能
+    # =====================================================================
+    st.write("---")
+    
+    if st.session_state["export_buffer"]:
+        st.markdown("#### ⚙️ 暫存資料修改與刪除面板")
+        
+        modify_options = []
+        for idx, item in enumerate(st.session_state["export_buffer"]):
+            modify_options.append(f"第 {idx + 1} 列 | {item['工程/報價案號']} | 時數: {item['填寫時數']} | {item['工作內容'][:10]}...")
+            
+        action_col1, action_col2, action_col3 = st.columns([50, 25, 25], gap="small")
+        
+        with action_col1:
+            selected_row_str = st.selectbox("🔍 8. 選擇欲修改/刪除的暫存列：", options=modify_options, key="select_row_to_modify")
+            selected_row_idx = modify_options.index(selected_row_str)
+            
+        with action_col2:
+            if st.button("🔄 覆蓋/更新至此列", width="stretch", type="secondary", key="overwrite_row_btn"):
+                st.session_state["show_overwrite_confirm"] = True
+                st.session_state["target_overwrite_idx"] = selected_row_idx
+                
+        with action_col3:
+            if st.button("❌ 從暫存區刪除此列", width="stretch", key="delete_row_btn"):
+                st.session_state["export_buffer"].pop(selected_row_idx)
+                st.toast("🗑️ 已成功刪除該列資料！")
+                st.rerun()
+
+        # ─── 顯示彈出式確認視窗 ───
+        if st.session_state.get("show_overwrite_confirm", False):
+            target_idx = st.session_state["target_overwrite_idx"]
+            st.markdown("---")
+            st.warning(f"❓ **是否確認覆蓋？** 您即將把上方選填的 **備註** 與 **時數** 重新覆寫至【第 {target_idx + 1} 列】。")
+            
+            confirm_col1, confirm_col2 = st.columns(2)
+            with confirm_col1:
+                if st.button("✅ 確定覆蓋", width="stretch", type="primary", key="confirm_overwrite_yes"):
+                    st.session_state["export_buffer"][target_idx]["備註"] = current_selected_info.get("備註", "")
+                    st.session_state["export_buffer"][target_idx]["填寫時數"] = current_selected_info.get("填寫時數", 1.0)
+                    
+                    st.session_state["show_overwrite_confirm"] = False
+                    st.toast("🎉 資料已成功重新覆寫！")
+                    st.rerun()
+            with confirm_col2:
+                if st.button("❌ 取消", width="stretch", key="confirm_overwrite_no"):
+                    st.session_state["show_overwrite_confirm"] = False
+                    st.rerun()
+
+    # =====================================================================
+    # 6. 渲染暫存區表格與儲存功能（支援 Google Drive 互動修正版）
     # =====================================================================
     st.write("---")
     output_container = st.container(key="stable_output_container")
@@ -342,38 +391,25 @@ if company_employees and available_files:
                 unsafe_allow_html=True
             )
             
-            # 4. 🛠️ 【修改點】在 disabled 參數中加入所有禁止修改的欄位，僅允許「備註」與「填寫時數」被自由編輯覆蓋
-            edited_df = st.data_editor(
+            # 4. 回復為穩定的唯讀 st.dataframe
+            st.dataframe(
                 buffer_df,
                 width="stretch",
-                num_rows="dynamic",
-                disabled=["填表日期", "員工姓名", "工程/報價案號", "工程名稱", "工作內容"], # 🔒 鎖定關鍵欄位
                 hide_index=False,
-                key="main_data_table_editor"
+                key="main_data_table_viewer"
             )
             
-            # 5. 將編輯後的最新結果洗回暫存記憶體
-            edited_df["填寫時數"] = pd.to_numeric(edited_df["填寫時數"], errors='coerce').fillna(0.0)
-            st.session_state["export_buffer"] = edited_df.to_dict(orient="records")
-            
-            # 6. 🔄 檢查總時數若被改動，即刻更新網頁數據
-            if edited_df["填寫時數"].sum() != total_hours:
-                st.rerun()
-            
-            # 點擊按鈕上傳至 Google Drive (使用最新的 edited_df)
+            # 點擊按鈕上傳至 Google Drive
             if st.button("💾 儲存至雲端硬碟 Google Drive", width="stretch", type="primary", key="save_report_btn"):
-                if not st.session_state["export_buffer"]:
-                    st.warning("⚠️ 暫存清單已被清空，無法儲存！")
-                else:
-                    report_owner = st.session_state["export_buffer"][0]["員工姓名"]
-                    file_name = f"{report_owner}_工作日誌時數報表_{datetime.now().strftime('%Y%m')}.xlsx"
+                report_owner = st.session_state["export_buffer"][0]["員工姓名"]
+                file_name = f"{report_owner}_工作日誌時數報表_{datetime.now().strftime('%Y%m')}.xlsx"
+                
+                with st.spinner("正在使用個人憑證同步至雲端硬碟..."):
+                    success = upload_excel_to_drive(file_name, buffer_df)
                     
-                    with st.spinner("正在使用個人憑證同步至雲端硬碟..."):
-                        success = upload_excel_to_drive(file_name, edited_df)
-                        
-                    if success:
-                        st.success(f"🎉 儲存成功！檔案 `{file_name}` 已安全同步至您的個人 Google Drive！")
-                        st.session_state["export_buffer"] = []
-                        st.rerun()
+                if success:
+                    st.success(f"🎉 儲存成功！檔案 `{file_name}` 已安全同步至您的個人 Google Drive！")
+                    st.session_state["export_buffer"] = []
+                    st.rerun()
         else:
             st.info("💡 暫存區無資料。請先選擇內容與時數後點擊「加入暫存區」。")
