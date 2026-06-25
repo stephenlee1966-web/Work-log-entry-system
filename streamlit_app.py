@@ -317,7 +317,7 @@ if company_employees and available_files:
             st.rerun()
 
     # =====================================================================
-    # 5. 🛠️ 【全新修改】暫存列選擇、刪除與「彈出確認視窗」的覆蓋功能
+    # 5. 🛠️ 暫存列選擇、刪除與「彈出確認視窗」的複寫功能（更新：包含案號、工作內容、備註與時數）
     # =====================================================================
     st.write("---")
     
@@ -349,16 +349,27 @@ if company_employees and available_files:
         if st.session_state.get("show_overwrite_confirm", False):
             target_idx = st.session_state["target_overwrite_idx"]
             st.markdown("---")
-            st.warning(f"❓ **是否確認覆蓋？** 您即將把上方選填的 **備註** 與 **時數** 重新覆寫至【第 {target_idx + 1} 列】。")
+            st.warning(
+                f"❓ **是否確認複寫？** 您即將把上方設定的：\n"
+                f"- 案號/名稱：`{current_selected_info.get('工程/報價案號','')}` | `{current_selected_info.get('工程名稱','')}`\n"
+                f"- 工作內容：`{current_selected_info.get('工作內容','')}`\n"
+                f"- 備註：`{current_selected_info.get('備註','')}`\n"
+                f"- 時數：`{current_selected_info.get('填寫時數', 1.0)} 小時` \n"
+                f"**完整複寫至【第 {target_idx + 1} 列】。**"
+            )
             
             confirm_col1, confirm_col2 = st.columns(2)
             with confirm_col1:
                 if st.button("✅ 確定覆蓋", width="stretch", type="primary", key="confirm_overwrite_yes"):
+                    # 🛠️ 執行複寫：同步覆蓋步驟 4, 5, 6, 7 的內容
+                    st.session_state["export_buffer"][target_idx]["工程/報價案號"] = current_selected_info.get("工程/報價案號", "")
+                    st.session_state["export_buffer"][target_idx]["工程名稱"] = current_selected_info.get("工程名稱", "無資料")
+                    st.session_state["export_buffer"][target_idx]["工作內容"] = current_selected_info.get("工作內容", "")
                     st.session_state["export_buffer"][target_idx]["備註"] = current_selected_info.get("備註", "")
                     st.session_state["export_buffer"][target_idx]["填寫時數"] = current_selected_info.get("填寫時數", 1.0)
                     
                     st.session_state["show_overwrite_confirm"] = False
-                    st.toast("🎉 資料已成功重新覆寫！")
+                    st.toast("🎉 步驟 4、5、6、7 的內容已成功重新複寫！")
                     st.rerun()
             with confirm_col2:
                 if st.button("❌ 取消", width="stretch", key="confirm_overwrite_no"):
