@@ -322,7 +322,7 @@ if company_employees and available_files:
     st.write("---")
     
     if st.session_state["export_buffer"]:
-        st.markdown("#### ⚙️ 暫存資料修改與刪除面板")
+        st.markdown("#### ⚙️ 暫存資料修改與刪除")
         
         modify_options = []
         for idx, item in enumerate(st.session_state["export_buffer"]):
